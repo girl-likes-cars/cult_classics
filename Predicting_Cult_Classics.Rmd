@@ -1,0 +1,645 @@
+)---
+title: "Predicting_Cult_Classics"
+author: "MAYSA JARUDI"
+date: "11/21/2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load("ggplot2","knitr","arm","foreign","eply", "car", "textclean", "Cairo","data.table","readxl","dplyr","tidyverse","kableExtra","maps","plotly","esquisse","gridExtra","viridis", "stringr", "summarytools", "readr", "rvest", "writexl", "mice", "VIM", "lme4", "sentimentr", update=FALSE)
+```
+
+## Predicting Cult Classics
+
+## Abstract
+
+American culture is not only defined by what the mass audience likes, but also by things that gain devotion and adoration with small groups of people. In fact, if you look at what movies are "cult hits" with people at any point in time, you get an immediate sense of the deeper dynamics at work in the culture. This is why cult hits are such an important part of our undersatnding of our culture, but it is also what makes them so interesting. There has always been a mysterious allure to cult hits and how any movie gaines a cult following. In this analysis, I attempt to unpack some of this mystery by asking the question, what predicts whether a movie will become a cult classic or not, and what does that tell us about American culture? By scraping popular web sites for cult hit rankings and then feeding that into a larger dataset of XXX movies that I obtain from IMDB and TMDB, I am able to develop a logistic mixed effects model to predict the probability of a movie becoming a cult classic. Results are pending as I complete basic cleaning of the dataset (for example, pulling out genre and production company information). Once this is complete, I will subset the data as training for the model, conduct testing on a test subset, and then leverage Bayesian simulation to predict which movies in 2018 are more likely to become cult hits over others. While there is much subjective discussion online about what movies will become cult hits, I was only able to find one other resource that attempted to quantify or predict cult classics using more quantitative methods. Upon achieving my results I will compare to what this other resource did.
+
+## The Data - Key Sources
+
+Cult Classics
+Given the incredibly subjective discussion about what qualifies a "cult hit", I decide to externally source my list of cult movies by deferring to online film discussion. I research online discusions and identify 10 websites that represent legitimate sources of film discussion (ex: Rolling Stone, IMDB, Gizmodo, Cinema Dailies) and have published rankings of cult classic films. I scrape these lists and obtain 808 unique movies mentioned by these websites. For the interest of sourcing only cult films that have SOME acknowledged consensus, I then subset to only movies that have been mentioned by at least 2 of the websites. This reduces my list to 165 movies, some of which are mentioned by as many as 8 of the 10 websites! From there, I will ultimately merge this list with my movie dataset and net out with 57 movies in my movie dataset that qualify as "cult hits" according to these sites.
+
+Overall Movie Data
+
+IMDB
+To obtain a dataset of as many movies as possible, I focus on legitimate data sources like IMDB and TMDB. Due to time constraints, I skip the step of manually scraping the data myself and instead refer to 2 versions of these datasets that are available on Kaggle. The IMDB data contains data on 5000 movies including descriptive (director, actor names, genre), financial (budget, gross revenue), and popularity/social media data (facebook likes, user ratings, IMDB score).
+
+TMBD 
+This data is also obtained from Kaggle and represents two separate datasets. They are both an exact match so I can merge them and then later join with the IMDB data. TMBD is another massive movie database and this data includes additiona features that the IMDB data does not have, including the production companies.
+
+The code below demonstrates how these datasets were read in, cleaned, and then joined into one movie dataset.
+
+```{r}
+# IMDB data
+imdb <- read_csv("5/movie_metadata.csv")
+problems(imdb) # 4 budget numbers are in japanese yen, manually read in (will filter out later)
+imdb[c(2324,2989,3006,3860),c("movie_title", "budget")] <- c(2400000000, 12215500000, 2500000000, 4200000000)
+imdb$movie_title <- str_trim(imdb$movie_title)
+head(imdb)
+
+# TMBD data
+tmd <- read_csv("6/tmdb_5000_credits.csv", col_types = list(col_integer(), col_character(), col_character(),col_character()))
+summary(tmd) # no missing values
+tmd_2 <- read_csv("6/tmdb_5000_movies.csv")
+summary(tmd_2)
+problems(tmd_2) # runtime values need to be set to NA
+summary(tmd_2$runtime)
+tmd_2[c(2641:2650),c("runtime")] <- c(115, 120, 98, 110, 110, 130, 94, 103, 104, 95) # manually enter runtime by quick internet research
+
+# datasets are an exact match by id:
+length(intersect(tmd$movie_id, tmd_2$id))
+
+# change id column name to match so i can join them:
+names(tmd)[1] <- c("id")
+tmd_final <- left_join(tmd_2, tmd, by = c("id"))
+head(tmd_final)
+
+# Look into merging TMBD with IMDB data above
+# determine what i want to port over from TMDB data
+sum(tmd_final$title.x==tmd_final$title.y) # title.x and title.y repetitive? yes, remove one
+
+# also, exclude genres, homepage, keywords, country, spoken languages, cast, crew, title.y
+# names(tmd_final)
+tmd_final <- tmd_final[,c(1,3:4,6:10,13:14,16:20)]
+# names(tmd_final)
+
+# left join tmd data into this op5 imdb dataset
+length(intersect(imdb$movie_title, tmd_final$title.x)) # 4591 matches with title.x column
+length(intersect(imdb$movie_title, tmd_final$original_title)) # fewer matches with original title column
+names(tmd_final)[13] <- c("movie_title") # change title.x name in tmd_final so it matches "movie_title" in IMDB file
+
+dim(imdb)
+dim(tmd_final)
+
+# proceed with left join using title.x column in tmd_final
+imdb <- left_join(imdb, tmd_final, by = c("movie_title")) # 15 + 28 variables = 43 - common id = 42
+
+# examine joined dataset
+# RENAME IT "MOVIE" DATASET
+movie <- imdb
+head(movie)
+# names(movie)
+# str(movie)
+```
+
+## The Data - Cleaning Process
+
+The IMDB and TMDB datasets both contain budget information, so I compare and choose one budget metric that has fewer missing values. I notice that there are two measures of movie length -- duration and runtime. Duration seems to potentially overestimate movie length but since it has fewer missing values, I choose to use this as a measure of movie length. I will keep this potential bias in mind when interpreting results later on.
+
+I find that there are instances of movies with the same name but are actually different movies (directors are different and were released in different years or have different plot keywords), so I only remove movies that have the same name AND the same director (these are 'true' duplicates). I also divide all financial metrics (budget, gross revenue, revenue) by 1,000,000 so that the numbers can be interpreted in terms of millions and so that the ultimate model is not thrown by the extreme scale. 
+
+As a later step, I hope to build new features for Genre and Production Company. Currently, this information is captured in messy text fields (for example, genre is listed for a movie as "Action | Romance | Comedy"). 
+
+See code below for all data cleaning.
+
+```{r}
+# compare budget.x with budget.y
+# if there's a discrepancy, on average, it's huge
+# this is likely due to currencies not being converted in one of the columns 
+# let's filter for these rows and take a look
+summary(movie$budget.x-movie$budget.y)
+movie[,c("movie_title", "budget.x", "budget.y")] %>%
+  filter(movie$budget.x-movie$budget.y != 0)
+
+# this reveals that there are instances of many zero values in budget.y column, which does not make sense
+# filter for instances where budget.y is not zero and look at discrepancies
+movie[,c("movie_title", "budget.x", "budget.y")] %>%
+  filter(movie$budget.y != 0)
+
+# looks like the big issue is the zero values in budget.y, so remove this column from dataset
+movie <- movie[,c(1:28,30:42)]
+# names(movie)
+
+# next, remove color and homepage columns (not necessary)
+# currently 41 columns
+# color = 1st column, homepage = 29th column
+movie <- movie[,c(2:28,30:41)]
+# names(movie)
+
+# compare duration with runtime
+# there do appear to be some discrepancies, likely caused by NA values
+# if we're excluding the NA values, are there discrepancies?
+summary(movie$duration-movie$runtime)
+summary(movie$duration)
+summary(movie$runtime)
+movie[,c("movie_title", "duration", "runtime")] %>%
+  filter(is.na(duration)==FALSE) %>%
+  filter(is.na(runtime)==FALSE) %>%
+  filter(duration != 0) %>%
+  filter(runtime != 0) %>%
+  mutate(difference = duration-runtime) %>%
+  arrange(desc(difference))
+
+# generally speaking, the discrepancies aren't that great
+# for purposes of priorization, i choose to go with duration since it has way fewer NA values
+# even though duration does seem to overestimate movie runtime/duration, so need to be wary of that later on
+# if this turns out to be an important predictor, i may want to circle back and do some more cleaning here
+
+# remove runtime as a column for now - 35th column our of 39 columns
+movie <- movie[,c(1:34,36:39)]
+
+# identify instances of duplicate names
+# create frequency dataframe
+freq <- as.data.frame(table(movie$movie_title))
+freq %>% # 
+  arrange(desc(Freq))
+names(freq) <- c("movie_title", "name_count") # change col names to match movie dataset
+freq$movie_title <- as.character(freq$movie_title) # change class to match movie dataset
+freq$name_count <- as.numeric(freq$name_count) # change class to match movie dataset
+
+# merge frequency dataframe with movie dataframe
+movie <- left_join(movie, freq, by = c("movie_title"))
+
+# filter for movies where freq > 1
+# there appear to be duplications
+# but need to be careful as there are also instances of two diff movies with same name
+movie[,c("movie_title", "director_name", "plot_keywords", "name_count")] %>%
+  filter(name_count > 1) %>%
+  arrange(desc(name_count))
+
+# filter for movies with same name and same director
+# in other words, treat these as duplicates
+# create freq table for director and left join with movie dataset
+director <- as.data.frame(table(movie$director_name))
+names(director) <- c("movie_title", "director_count") # change col names to match movie dataset
+director$movie_title <- as.character(director$movie_title) # change class to match movie dataset
+director$director_count <- as.numeric(director$director_count) # change class to match movie dataset
+director %>%
+  arrange(desc(director_count))
+movie <- left_join(movie, director, by = c("movie_title"))
+
+# finally, filter out movies with same AND same director
+movie <- movie %>%
+  distinct(movie_title, director_name, .keep_all=TRUE)
+
+# reorder columns of movie dataset
+coL_order <- c("id", "movie_title", "original_title", "title_year", "production_companies", "director_name", "genres", "budget.x", "gross", "revenue", "duration", "content_rating", "actor_1_name", "actor_2_name", "actor_3_name", "num_user_for_reviews", "imdb_score", "num_critic_for_reviews", "popularity", "num_voted_users", "movie_facebook_likes",
+"director_facebook_likes", "cast_total_facebook_likes", "actor_1_facebook_likes", "actor_2_facebook_likes", "actor_3_facebook_likes", "facenumber_in_poster", "vote_average", "vote_count", "original_language", "language", "country", "movie_imdb_link", "aspect_ratio", "status", "name_count", "director_count", "tagline", "plot_keywords", "overview")
+movie <- movie[,coL_order]
+head(movie)
+names(movie)
+
+# rename budget, remove IMDB link, remove director_count, remove aspect_ratio
+names(movie)[8] <- c("budget")
+movie <- movie[,c(1:32, 34:40)]
+movie <- movie[,c(1:35, 37:39)]
+movie <- movie[,c(1:32, 34:38)]
+
+# convert budget, revenue, and gross to millions
+movie$budget <- (movie$budget/1000000)
+movie$revenue <- (movie$revenue/1000000)
+movie$gross <- (movie$gross/1000000)
+
+# revisit budget, revenue, and gross to make sure numbers make sense
+boxplot(movie$budget) # several points of 2billion budgets make no sense
+boxplot(movie$revenue) # 
+boxplot(movie$gross) # 600 million is believable, but...
+
+movie <- movie %>%
+  filter(country=="USA")
+
+```
+
+## Data - Missingness Analysis 
+
+108 movies out of the dataset lack all financial information. Since this is a very important predictor for my model, I choose to exclude these movies from the dataset. I also find instances where Facebook Like data is missing for 300 movies, and have not yet determined how to solve for this.
+
+```{r}
+summary(movie)
+
+# missingness for financials
+md.pattern(movie[,c("budget", "gross", "revenue")])
+
+# missingness for social/popularity
+md.pattern(movie[,c("num_user_for_reviews", "num_critic_for_reviews" ,"popularity", "director_facebook_likes")])
+
+# missingness for votes
+md.pattern(movie[,c("vote_average", "vote_count")])
+  
+# SUBSET OF MOVIE DATASET
+# next steps to deal with missingness
+# remove 108 movies that lack all financial information (revenue, budget, and gross)
+# create an average number of likes to account for ~ 300 instances of missing facebook like information
+# 326 movies lack average vote and average vote count
+
+# remove 108 movies that lack all financial information (revenue, budget, and gross)
+movie$lack_financial <- ifelse(is.na(movie$budget)==TRUE & is.na(movie$gross)==TRUE & is.na(movie$revenue)==TRUE, 1, 0)
+sum(movie$lack_financial)==108 # make sure this adds to 108
+movie.sub <- movie[movie$lack_financial==0,] # save movie dataset as excluding these 108 movies
+nrow(movie)-nrow(movie.sub)==108 # check that worked right
+movie.sub <- movie.sub[,c(1:37)] # remove "lack_financial" column, no longer needed
+
+# exclude average vote and average vote count
+movie.sub <- movie.sub[,c(1:27,30:37)]
+
+# rename larger dataset "movie.full"
+movie.full <- movie
+```
+
+## Data - Joining Cult Data with Movie Data
+
+My "movie.sub" data represents the data I will be using for modeling, and I then join my cult movie list into this data. 
+
+```{r}
+
+# compare to cult movie list
+cults <- read_csv(file = "cults.csv")
+names(cults) 
+head(cults)
+length(intersect(cults$movie, movie.sub$movie_title)) # 57 movies overlap
+length(intersect(cults$movie, movie.sub$original_title)) # 
+
+# create subset of cult dataset that is just the movie title and cult "mentions"
+# cult mentions = number of times the movie was referenced in the websites i looked at
+cults <- cults[,c("movie", "mentions")]
+head(cults)
+
+#rename columns for clarity
+names(cults) <- c("movie_title", "cult_mentions")
+head(cults)
+cults$movie_title <- as.character(cults$movie_title)
+
+# join into movie.sub dataset
+movie.sub <- left_join(movie.sub, cults, by = c("movie_title"))
+head(movie.sub)
+
+movie.sub %>%
+  arrange(desc(cult_mentions))
+
+# create binary cult status indicator
+movie.sub$cult <- ifelse(is.na(movie.sub$cult_mentions)==FALSE, 1, 0) # if cult_mentions is not NA, then it's a cult
+head(movie.sub)
+
+movie.sub %>%
+  filter(cult==1) %>%
+  arrange(desc(cult_mentions))
+
+sum(movie.sub$cult)
+names(movie.sub)
+
+```
+
+
+
+## Building New Features
+
+FRIDAY --
+CONVERT ACTOR INTO A FAMOUS BINARY INDICATOR
+IMPORT SENTIMENR PACKAGE AND SENTIMENT SCORING 
+
+Things left to do before modeling:
+- Turn genre and production studios into workable name columns
+- Think about how to handle the low number of movies for 2016 -- need to be careful with time series
+- How to handle missing Facebook like data
+- Add binary indicator for "famous" actor or not (find list of 250 most famous actors in USA and merge to make binary)
+- Add binary indicator top directors
+- Look into what is "popularity" vs. IMDB score in the data
+- Longer-term, sentiment score on tagline + plot keywords?
+
+Fixed Effects
+- Duration
+- Rating (PG-13, R, ...)
+- Famousness of Actor (binary)
+- Famousness of Director
+- Popularity of the movie
+- Facebook Likes
+- Budget (in millions)
+- Gross (in millions)
+- Revenue (in millions)
+- Cult vs. noncult
+
+Random Effect
+- Year
+- Genre
+- Production Company
+
+Building Genre
+
+```{r}
+movie.sub$genres[1:5]
+test <- c("Action|Adventure|Fantasy|Sci-Fi")
+split_words <- function(x) {
+  strsplit(x, "[^[:alpha:]]+")
+}
+
+# FIRST - identify the set of genre categories
+# split genre list across all movies into giant list, then unlist into vector, and take unique
+genre_list <- unique(unlist(split_words(movie.sub$genres)))
+genre_list # 30 genre categories
+
+```
+
+
+```{r}
+
+# make a copy of genre column
+movie.sub$genres2 <- movie.sub$genres
+
+# split genre column into 30 columns
+# content from genre column is now split out across these 30 columns
+
+movie.sub <- movie.sub %>%
+  separate(genres2, c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "AB", "BC", "CD", "DE"))
+
+# unfortunately this removes the genres column but we still NEEDED that
+# so let's make a copy of the genres column
+# so we need to make a new dataframe and then r
+
+head(movie.sub)
+names(movie.sub)
+
+# create 30 genre columns
+genre_list
+movie.sub <- cbind(movie.sub, setNames(lapply(genre_list, function(x) x=NA), genre_list))
+
+# ACTION
+# FOR EVERY MOVIE IN THE DATASET
+for (i in 1:nrow(movie.sub)) {
+  # if apply function finds Action in columns 7 - 36
+  # it will return TRUE and therefore equal at least 1
+  # if that's the case then action is one of the genres
+  # in which case action column should equal 1
+  movie.sub$Action[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Action"))) >= 1, 1, 0)
+  movie.sub$Adventure[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Adventure"))) >= 1, 1, 0)
+  movie.sub$Fantasy[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Fantasy"))) >= 1, 1, 0)
+  movie.sub$Sci[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Sci"))) >= 1, 1, 0)
+  movie.sub$Fi[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Fi"))) >= 1, 1, 0)
+  movie.sub$Thriller[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Thriller"))) >= 1, 1, 0)
+  movie.sub$Romance[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Romance"))) >= 1, 1, 0)
+  movie.sub$Animation[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Animation"))) >= 1, 1, 0)
+  movie.sub$Comedy[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Comedy"))) >= 1, 1, 0)
+  movie.sub$Family[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Family"))) >= 1, 1, 0)
+  movie.sub$Musical[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Musical"))) >= 1, 1, 0)
+  movie.sub$Western[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Western"))) >= 1, 1, 0)
+  movie.sub$Drama[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Drama"))) >= 1, 1, 0)
+  movie.sub$History[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("History"))) >= 1, 1, 0)
+  movie.sub$Sport[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Sport"))) >= 1, 1, 0)
+  movie.sub$Crime[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Crime"))) >= 1, 1, 0)
+  movie.sub$Horror[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Horror"))) >= 1, 1, 0)
+  movie.sub$Mystery[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Mystery"))) >= 1, 1, 0)
+  movie.sub$War[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("War"))) >= 1, 1, 0)
+  movie.sub$Biography[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Biography"))) >= 1, 1, 0)
+  movie.sub$Music[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Music"))) >= 1, 1, 0)
+  movie.sub$Documentary[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Documentary"))) >= 1, 1, 0)
+  movie.sub$Game[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Game"))) >= 1, 1, 0)
+  movie.sub$Show[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Show"))) >= 1, 1, 0)
+  movie.sub$Reality[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Reality"))) >= 1, 1, 0)
+  movie.sub$TV[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("TV"))) >= 1, 1, 0)
+  movie.sub$News[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("News"))) >= 1, 1, 0)
+  movie.sub$Short[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Short"))) >= 1, 1, 0)
+  movie.sub$Film[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Film"))) >= 1, 1, 0)
+  movie.sub$Noir[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Noir"))) >= 1, 1, 0)
+}
+
+head(movie.sub[,c("movie_title", "genres", "Action", "Romance")])
+
+# strip out A-DE columns (columns 38 to 67)
+ names(movie.sub)
+movie.sub <- movie.sub[,c(1:37, 68:97)] # remove A-DE columns
+names(movie.sub)
+# 
+# # Sci Fi, Reality TV, Game Show and Short Film should be single columns
+# # exclude "Fi", "TV", "Show", and "Film" columns and then rename existing ones
+movie.sub <- movie.sub[,c(1:41, 43:60, 62, 64:65, 67)]
+names(movie.sub)[c(41, 59, 60, 62)] <- c("SciFi", "GameShow", "RealityTV", "ShortFilm")
+names(movie.sub)
+
+# distribution of genres
+summary(movie.sub[,c(38:63)])
+
+```
+
+
+## EDA - Initial Look
+
+```{r}
+
+## FINANCIALS
+
+# Movie budgets are heavily right-skewed
+# Benefits from log transformation
+ggplot(data = movie.sub) +
+  aes(x = budget) +
+  geom_histogram(bins = 30) +
+  geom_bar(position = "fill") +
+  labs(title = 'Figure 2: Distribution of movie budgets',
+    x = 'Budget',
+    y = 'Frequency') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(x = gross) +
+  geom_histogram(bins = 30) +
+  geom_bar(position = "fill") +
+  labs(title = 'Figure 3: Distribution of gross revenue',
+    x = 'Gross Revenue',
+    y = 'Frequency') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(x = log(gross)) +
+  geom_histogram(bins = 30) +
+  geom_bar(position = "fill") +
+  labs(title = 'Distribution of movie gross',
+    x = 'Gross',
+    y = 'Frequency') +
+  theme_minimal()
+
+# Some movies are hugely unprofitable and hugely profitable
+# high budget low revenue, low budget high revenue
+ggplot(data = movie.sub) +
+  aes(x = budget, y = gross, color = cult) +
+  geom_point() +
+  labs(title = 'Budget vs. Gross Revenue',
+    x = 'Budget',
+    y = 'Revenue',
+    subtitle = 'Gives a sense of profitability') +
+  theme_minimal()
+
+movie.sub.non <- movie.sub %>%
+  filter(cult==0)
+
+movie.sub.cult <- movie.sub %>%
+  filter(cult==1)
+
+ggplot(data = movie.sub.non) +
+  aes(x = budget, y = gross) +
+  geom_point(color = '#0c4c8a') +
+  labs(title = 'Figure 4: Budget vs. Gross Revenue for Non-Cults',
+    x = 'Budget',
+    y = 'Revenue') +
+  geom_abline(slope = 1, intercept = 0, col="green") +
+  theme_minimal()
+
+ggplot(data = movie.sub.cult) +
+  aes(x = budget, y = gross) +
+  geom_point(color = '#0c4c8a') +
+  labs(title = 'Figure 5: Budget vs. Gross Revenue for Cults',
+    x = 'Budget',
+    y = 'Revenue') +
+  geom_abline(slope = 1, intercept = 0, col="green") +
+  theme_minimal()
+
+## RATINGS 
+
+movie.sub[,c("movie_title", "country", "budget")] %>%
+  filter(budget > 250) %>%
+  arrange(desc(budget))
+
+# Majority of cult hits are R rated  
+# Even so, largest number of movies are R rated in general! 
+table(movie.sub$content_rating, movie.sub$cult)
+
+# boxplot comparing cult to non-cult
+
+# SOCIAL MEDIA / REVIEWS / POPULARITY
+
+ggplot(data = movie.sub) +
+  aes(x = movie_facebook_likes, y = cast_total_facebook_likes, color = cult) +
+  geom_point() +
+  geom_smooth(span = 0.75) +
+  labs(title = 'Facebook Likes: Movie vs. Cast',
+    x = 'Facebook Likes for Movie',
+    y = 'Facebook Likes for Cast') +
+  theme_minimal()
+
+# GENRES
+# what are top 5 Action movies by revenue?
+
+movie.sub[,c("movie_title", "Action", "revenue", "cult")] %>%
+  filter(Action==1) %>%
+  arrange(desc(revenue))
+
+
+```
+
+Comparing cults with noncults
+
+```{r}
+
+# FINANCIALS 
+# Log transformed
+
+ggplot(data = movie.sub) +
+  aes(cult, log(budget)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Budget for Cults/Noncults',
+    x = '',
+    y = 'LogBudget') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, log(revenue)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Revenue for Cults/Noncults',
+    x = '',
+    y = 'LogRevenue') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, log(gross)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Gross for Cults/Noncults',
+    x = '',
+    y = 'LogGross') +
+  theme_minimal()
+
+# profitability? 
+# revenue / budget
+# gross / budget
+# hard to compare right off the bat
+# will need to remove outliers to better see 
+
+movie.sub$roi_r <- movie.sub$revenue/movie.sub$budget
+movie.sub$roi_g <- movie.sub$gross/movie.sub$budget
+
+ggplot(data = movie.sub) +
+  aes(cult, log(roi_r)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 6: ROI for Non-cults vs. Cults',
+    x = '',
+    y = 'Log Revenue / Budget') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, log(roi_g)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'ROI for Cults/Noncults',
+    x = '',
+    y = 'Log Gross / Budget') +
+  theme_minimal()
+
+# top 5 cult movies by revenue: 
+# exorcist, planet of the apes, pulp fiction, kill bill, gremlines
+movie.sub[,c("movie_title", "revenue", "cult", "genres")] %>%
+  filter(cult==1) %>%
+  arrange(desc(revenue))
+
+# top 5 cult movies by gross: 
+# exorcist, planet of the apes, gremlines, total hairspray, pulp fiction
+movie.sub[,c("movie_title", "gross", "cult", "genres")] %>%
+  filter(cult==1) %>%
+  arrange(desc(gross))
+
+# cult status as response variable
+
+ggplot(data = movie.sub) +
+  aes(x = budget, y = cult) +
+  geom_point(color = '#0c4c8a') +
+  labs(title = 'Figure 7: Cult Status vs. Budget',
+    x = 'Budget',
+    y = 'Cult Status') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(x = gross, y = cult) +
+  geom_point(color = '#0c4c8a') +
+  labs(title = 'Figure 8: Cult Status vs. Gross Revenue',
+    x = 'Gross Revenue',
+    y = 'Cult Status') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(x = popularity, y = cult) +
+  geom_point(color = '#0c4c8a') +
+  labs(title = 'Cult Status vs. Popularity',
+    x = 'Popularity',
+    y = 'Cult Status') +
+  theme_minimal()
+```
+
+
+## Time Series
+
+```{r}
+library(ggplot2)
+
+ggplot(data = movie.sub) +
+  aes(x = title_year) +
+  geom_histogram(bins = 30, fill = '#0c4c8a') +
+  labs(title = 'Figure 1: Movies by Year',
+    x = 'Year',
+    y = 'Frequency') +
+  theme_minimal()
+
+```
+
+
+## Modeling
+
+GLMER 
+
+```{r}
+
+summary(movie.full$title_year)
+dim(movie.sub)
+
+# glmer(cult ~ budget + (1|genres), family = binomial(link = "logit"), data = movie.sub)
+```
+
+
+
+
+
