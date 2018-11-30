@@ -33,16 +33,16 @@ The code below demonstrates how these datasets were read in, cleaned, and then j
 
 ```{r}
 # IMDB data
-imdb <- read_csv("5/movie_metadata.csv")
+imdb <- read_csv("movie_metadata.csv")
 problems(imdb) # 4 budget numbers are in japanese yen, manually read in (will filter out later)
 imdb[c(2324,2989,3006,3860),c("movie_title", "budget")] <- c(2400000000, 12215500000, 2500000000, 4200000000)
 imdb$movie_title <- str_trim(imdb$movie_title)
 head(imdb)
 
 # TMBD data
-tmd <- read_csv("6/tmdb_5000_credits.csv", col_types = list(col_integer(), col_character(), col_character(),col_character()))
+tmd <- read_csv("tmdb_5000_credits.csv", col_types = list(col_integer(), col_character(), col_character(),col_character()))
 summary(tmd) # no missing values
-tmd_2 <- read_csv("6/tmdb_5000_movies.csv")
+tmd_2 <- read_csv("tmdb_5000_movies.csv")
 summary(tmd_2)
 problems(tmd_2) # runtime values need to be set to NA
 summary(tmd_2$runtime)
