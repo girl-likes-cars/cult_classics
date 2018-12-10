@@ -7,7 +7,7 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-pacman::p_load("ggplot2","knitr","arm","foreign","eply", "car", "textclean", "Cairo","data.table","readxl","dplyr","tidyverse","kableExtra","maps","plotly","esquisse","gridExtra","viridis", "stringr", "summarytools", "readr", "rvest", "writexl", "mice", "VIM", "lme4", "sentimentr", update=FALSE)
+pacman::p_load("ggplot2","knitr","arm","foreign","eply", "car", "textclean", "Cairo","data.table","readxl","dplyr","tidyverse","kableExtra","maps","plotly","esquisse","gridExtra","viridis", "stringr", "summarytools", "readr", "rvest", "writexl", "mice", "VIM", "lme4", "sentimentr", "tm", "SnowballC", "wordcloud", "RColorBrewer", "corrplot", "rstanarm", update=FALSE)
 ```
 
 ## Predicting Cult Classics
@@ -33,16 +33,16 @@ The code below demonstrates how these datasets were read in, cleaned, and then j
 
 ```{r}
 # IMDB data
-imdb <- read_csv("movie_metadata.csv")
+imdb <- read_csv("5/movie_metadata.csv")
 problems(imdb) # 4 budget numbers are in japanese yen, manually read in (will filter out later)
 imdb[c(2324,2989,3006,3860),c("movie_title", "budget")] <- c(2400000000, 12215500000, 2500000000, 4200000000)
 imdb$movie_title <- str_trim(imdb$movie_title)
 head(imdb)
 
 # TMBD data
-tmd <- read_csv("tmdb_5000_credits.csv", col_types = list(col_integer(), col_character(), col_character(),col_character()))
+tmd <- read_csv("6/tmdb_5000_credits.csv", col_types = list(col_integer(), col_character(), col_character(),col_character()))
 summary(tmd) # no missing values
-tmd_2 <- read_csv("tmdb_5000_movies.csv")
+tmd_2 <- read_csv("6/tmdb_5000_movies.csv")
 summary(tmd_2)
 problems(tmd_2) # runtime values need to be set to NA
 summary(tmd_2$runtime)
@@ -206,6 +206,10 @@ movie <- movie %>%
 
 108 movies out of the dataset lack all financial information. Since this is a very important predictor for my model, I choose to exclude these movies from the dataset. I also find instances where Facebook Like data is missing for 300 movies, and have not yet determined how to solve for this.
 
+For the financials, I find that Revenue has 900 zero values and 127 NA values. Meanwhile, Gross has no zero values and only 484 NA values. It is likely that Revenue represents "net" revenue whereas gross is just gross revenue (all positive revenue, aka, ticket sales, etc.). It's less important that I do an analysis of the nuances of these two types of revenue calculations. Instead, I just need some measure of revenue for the max number of movies. Given that, I choose to use *gross* as my key revenue metric moving forward, and exclude *revenue* as a predictor from my dataset.
+
+Revenue information is available for more movies so in general, I will focus on using revenue as a primary representative of a movie's ticket sales (as compared to gross).
+
 ```{r}
 summary(movie)
 
@@ -221,8 +225,6 @@ md.pattern(movie[,c("vote_average", "vote_count")])
 # SUBSET OF MOVIE DATASET
 # next steps to deal with missingness
 # remove 108 movies that lack all financial information (revenue, budget, and gross)
-# create an average number of likes to account for ~ 300 instances of missing facebook like information
-# 326 movies lack average vote and average vote count
 
 # remove 108 movies that lack all financial information (revenue, budget, and gross)
 movie$lack_financial <- ifelse(is.na(movie$budget)==TRUE & is.na(movie$gross)==TRUE & is.na(movie$revenue)==TRUE, 1, 0)
@@ -234,8 +236,18 @@ movie.sub <- movie.sub[,c(1:37)] # remove "lack_financial" column, no longer nee
 # exclude average vote and average vote count
 movie.sub <- movie.sub[,c(1:27,30:37)]
 
+# revenue: 900 zero values, 127 null values
+# gross: no zero values, 484 null values
+# revenue is likely NET revenue (gross - cost) and gross is just positive revenue
+# need to pick a single version to go with
+# gross presents fewer null/missing/zero values, so go with that for all revenue analysis
+# remove revenue from dataset
+names(movie.sub)
+movie.sub <- movie.sub[,c(1:9, 11:35)]
+
 # rename larger dataset "movie.full"
 movie.full <- movie
+
 ```
 
 ## Data - Joining Cult Data with Movie Data
@@ -281,22 +293,10 @@ names(movie.sub)
 
 ```
 
-
-
 ## Building New Features
 
-FRIDAY --
-CONVERT ACTOR INTO A FAMOUS BINARY INDICATOR
-IMPORT SENTIMENR PACKAGE AND SENTIMENT SCORING 
-
-Things left to do before modeling:
-- Turn genre and production studios into workable name columns
-- Think about how to handle the low number of movies for 2016 -- need to be careful with time series
-- How to handle missing Facebook like data
-- Add binary indicator for "famous" actor or not (find list of 250 most famous actors in USA and merge to make binary)
-- Add binary indicator top directors
-- Look into what is "popularity" vs. IMDB score in the data
-- Longer-term, sentiment score on tagline + plot keywords?
+Response
+- Cult vs. noncult
 
 Fixed Effects
 - Duration
@@ -308,14 +308,13 @@ Fixed Effects
 - Budget (in millions)
 - Gross (in millions)
 - Revenue (in millions)
-- Cult vs. noncult
 
 Random Effect
 - Year
 - Genre
 - Production Company
 
-Building Genre
+# New Feature: Genre
 
 ```{r}
 movie.sub$genres[1:5]
@@ -361,53 +360,319 @@ for (i in 1:nrow(movie.sub)) {
   # it will return TRUE and therefore equal at least 1
   # if that's the case then action is one of the genres
   # in which case action column should equal 1
-  movie.sub$Action[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Action"))) >= 1, 1, 0)
-  movie.sub$Adventure[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Adventure"))) >= 1, 1, 0)
-  movie.sub$Fantasy[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Fantasy"))) >= 1, 1, 0)
-  movie.sub$Sci[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Sci"))) >= 1, 1, 0)
-  movie.sub$Fi[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Fi"))) >= 1, 1, 0)
-  movie.sub$Thriller[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Thriller"))) >= 1, 1, 0)
-  movie.sub$Romance[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Romance"))) >= 1, 1, 0)
-  movie.sub$Animation[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Animation"))) >= 1, 1, 0)
-  movie.sub$Comedy[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Comedy"))) >= 1, 1, 0)
-  movie.sub$Family[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Family"))) >= 1, 1, 0)
-  movie.sub$Musical[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Musical"))) >= 1, 1, 0)
-  movie.sub$Western[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Western"))) >= 1, 1, 0)
-  movie.sub$Drama[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Drama"))) >= 1, 1, 0)
-  movie.sub$History[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("History"))) >= 1, 1, 0)
-  movie.sub$Sport[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Sport"))) >= 1, 1, 0)
-  movie.sub$Crime[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Crime"))) >= 1, 1, 0)
-  movie.sub$Horror[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Horror"))) >= 1, 1, 0)
-  movie.sub$Mystery[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Mystery"))) >= 1, 1, 0)
-  movie.sub$War[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("War"))) >= 1, 1, 0)
-  movie.sub$Biography[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Biography"))) >= 1, 1, 0)
-  movie.sub$Music[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Music"))) >= 1, 1, 0)
-  movie.sub$Documentary[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Documentary"))) >= 1, 1, 0)
-  movie.sub$Game[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Game"))) >= 1, 1, 0)
-  movie.sub$Show[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Show"))) >= 1, 1, 0)
-  movie.sub$Reality[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Reality"))) >= 1, 1, 0)
-  movie.sub$TV[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("TV"))) >= 1, 1, 0)
-  movie.sub$News[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("News"))) >= 1, 1, 0)
-  movie.sub$Short[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Short"))) >= 1, 1, 0)
-  movie.sub$Film[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Film"))) >= 1, 1, 0)
-  movie.sub$Noir[i] <- ifelse(sum(apply(movie.sub[i,c(38:67)], 2, '%in%', x=c("Noir"))) >= 1, 1, 0)
+  movie.sub$Action[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Action"))) >= 1, 1, 0)
+  movie.sub$Adventure[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Adventure"))) >= 1, 1, 0)
+  movie.sub$Fantasy[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Fantasy"))) >= 1, 1, 0)
+  movie.sub$Sci[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Sci"))) >= 1, 1, 0)
+  movie.sub$Fi[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Fi"))) >= 1, 1, 0)
+  movie.sub$Thriller[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Thriller"))) >= 1, 1, 0)
+  movie.sub$Romance[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Romance"))) >= 1, 1, 0)
+  movie.sub$Animation[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Animation"))) >= 1, 1, 0)
+  movie.sub$Comedy[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Comedy"))) >= 1, 1, 0)
+  movie.sub$Family[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Family"))) >= 1, 1, 0)
+  movie.sub$Musical[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Musical"))) >= 1, 1, 0)
+  movie.sub$Western[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Western"))) >= 1, 1, 0)
+  movie.sub$Drama[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Drama"))) >= 1, 1, 0)
+  movie.sub$History[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("History"))) >= 1, 1, 0)
+  movie.sub$Sport[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Sport"))) >= 1, 1, 0)
+  movie.sub$Crime[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Crime"))) >= 1, 1, 0)
+  movie.sub$Horror[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Horror"))) >= 1, 1, 0)
+  movie.sub$Mystery[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Mystery"))) >= 1, 1, 0)
+  movie.sub$War[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("War"))) >= 1, 1, 0)
+  movie.sub$Biography[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Biography"))) >= 1, 1, 0)
+  movie.sub$Music[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Music"))) >= 1, 1, 0)
+  movie.sub$Documentary[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Documentary"))) >= 1, 1, 0)
+  movie.sub$Game[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Game"))) >= 1, 1, 0)
+  movie.sub$Show[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Show"))) >= 1, 1, 0)
+  movie.sub$Reality[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Reality"))) >= 1, 1, 0)
+  movie.sub$TV[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("TV"))) >= 1, 1, 0)
+  movie.sub$News[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("News"))) >= 1, 1, 0)
+  movie.sub$Short[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Short"))) >= 1, 1, 0)
+  movie.sub$Film[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Film"))) >= 1, 1, 0)
+  movie.sub$Noir[i] <- ifelse(sum(apply(movie.sub[i,c(37:66)], 2, '%in%', x=c("Noir"))) >= 1, 1, 0)
 }
 
 head(movie.sub[,c("movie_title", "genres", "Action", "Romance")])
 
-# strip out A-DE columns (columns 38 to 67)
+# strip out A-DE columns (columns 37 to 66)
  names(movie.sub)
-movie.sub <- movie.sub[,c(1:37, 68:97)] # remove A-DE columns
+movie.sub <- movie.sub[,c(1:36, 67:96)] # remove A-DE columns
 names(movie.sub)
 # 
 # # Sci Fi, Reality TV, Game Show and Short Film should be single columns
 # # exclude "Fi", "TV", "Show", and "Film" columns and then rename existing ones
-movie.sub <- movie.sub[,c(1:41, 43:60, 62, 64:65, 67)]
-names(movie.sub)[c(41, 59, 60, 62)] <- c("SciFi", "GameShow", "RealityTV", "ShortFilm")
+movie.sub <- movie.sub[,c(1:40, 42:59, 61, 63:64, 66)]
+names(movie.sub)[c(40, 58, 59, 61)] <- c("SciFi", "GameShow", "RealityTV", "ShortFilm")
+
 names(movie.sub)
 
-# distribution of genres
-summary(movie.sub[,c(38:63)])
+# correlation among genres?
+corr_genre <- cor(movie.sub[,c("Action", "Adventure", "Fantasy", "SciFi", "Thriller", "Romance", "Animation", "Comedy", "Family",
+ "Musical", "Western", "Drama", "History", "Sport", "Crime", "Horror",
+ "Mystery", "War", "Biography", "Music", "Documentary", "GameShow",
+ "RealityTV", "News", "ShortFilm", "Noir")])
+corr_genre
+
+corrplot(corr_genre, method = "circle", main = "Figure 1")
+
+# correlation between Family and Animation, Biography with War and Sport, Crime and Mystery with Thriller...but even then these aren't THAT high
+
+movie.sub.non <- movie.sub %>%
+  filter(cult==0)
+
+movie.sub.cult <- movie.sub %>%
+  filter(cult==1)
+
+# correlation among cults only?
+
+corr_genre_c <- cor(movie.sub.cult[,c("Action", "Adventure", "Fantasy", "SciFi", "Thriller", "Romance", "Comedy", "Family",
+ "Musical", "Western", "Drama", "Sport", "Crime", "Horror",
+ "Mystery", "War", "Biography", "Music")])
+corr_genre_c
+
+corrplot(corr_genre_c, method = "circle")
+```
+
+# New Feature: Director Success
+
+New feature, "director_cum_rev", sums the cumulative revenue EXCEPT for the current year's title
+The idea is that this would allow me to predict whether a given movie is going to become a cult hit or not, based on the director's prior success.
+
+```{r}
+
+# create cumulative revenue column
+movie.sub <- movie.sub %>%
+  group_by(director_name) %>%
+  arrange(title_year) %>%
+  mutate(director_cum_rev = cumsum(gross)-gross)
+
+# check steven spielberg's numbers look good:
+movie.sub[,c("movie_title", "gross", "title_year", "director_name", "director_cum_rev")] %>%
+  filter(director_name==c("Steven Spielberg")) %>%
+  group_by(director_name) %>%
+  arrange(desc(director_cum_rev))
+
+```
+
+Building Cast Effect Feature -- must revisit later
+
+How do I want to do this ? maybe look at all 3 actors and sum up their cumulative revenue up until that point ot et a "cast_cum_rev" figure. 
+You would have to do it for each actor. And then sum it.
+So you'd have actor_1_cum_rev, actor_2_cum_rev, actor_3_cum_rev
+
+Ok the problem with this method is that actor names appear in all 3 lists
+So really what we need is:
+
+Actor Revenue Dataset
+A dataset that gives:
+actor name, movie, year, revenue, cum revenue
+
+And then in movie.sub:
+Left join movie.sub with Actor Revenue Dataset by actor_1_name, and call that "cum_revenue_actor_1"
+Left join movie.sub with Actor Revenue Dataset by actor_2_name, and call that "cum_revenue_actor_2"
+Left join movie.sub with Actor Revenue Dataset by actor_3_name, and call that "cum_revenue_actor_3"
+
+So then you're going to have:
+The movie, actor_1_name - actor_3_name, and then you'll have cumulative revenue for actor 1
+
+To make the Actor Revenue Dataset:
+Take all 3 actor name columns and merge them into a single column of unique data
+Then left join the movie.sub dataset into this 
+
+```{r}
+
+# # create actor revenue dataset
+# # first, get list of unique actors from all 3 actor columns (actor_1_name, actor_2_name, actor_3_name)
+# actor_list <- c(movie.sub$actor_1_name, movie.sub$actor_2_name, movie.sub$actor_3_name)
+# length(actor_list)==nrow(movie.sub)*3 
+# length(unique(actor_list)) 
+# actor_list <- unique(actor_list)
+# length(actor_list) # 4591 unique actors in the dataset
+# actor_list <- as.data.frame(actor_list)
+# 
+# # now, left join movie.sub to get movie, year, and revenue
+# # temporarily call column "actor 1 name" so we can left join from movie.sub
+# names(actor_list) <- c("actor_1_name")
+# actor <- left_join(actor_list, movie.sub[,c("movie_title", "title_year", "revenue", "actor_1_name")], by = c("actor_1_name"))
+# actor
+# 
+# # repeat process to get actor_2 data and actor_3 data
+# names(actor_list) <- c("actor_2_name")
+# actor <- left_join(actor_list, movie.sub[,c("movie_title", "title_year", "revenue", "actor_2_name")], by = c("actor_2_name"))
+# actor
+# 
+# names(actor_list) <- c("actor_3_name")
+# actor <- left_join(actor_list, movie.sub[,c("movie_title", "title_year", "revenue", "actor_3_name")], by = c("actor_3_name"))
+# actor
+# 
+# # drop NAs
+# actor <- actor %>%
+#   filter(is.na(title_year)==FALSE) %>%
+#   filter(is.na(revenue)==FALSE)
+# 
+# # change column name to "actor_name"
+# names(actor)[1] <- c("actor_name")
+# 
+# # add cumulative revenue
+# actor <- actor %>%
+#   group_by(actor_name) %>%
+#   arrange(title_year) %>%
+#   mutate(actor_cum_rev = cumsum(revenue)-revenue)
+# 
+# # will have to check and see if this worked right
+# # next, start pulling cum rev into movie.sub dataset
+# # then, i can go through and start pulling cumulative revenue into the movie.sub dataset
+
+```
+
+# New Feature: Movie Sentiment
+
+Package used: sentimentr
+Used default dictionary:
+Jocker's (2017) dictionary from the syuzhet package
+You can type "lexicon::hash_sentiment_jockers_rinker" in R to see the dictionary
+
+I do some manual checks by picking a few movies and testing to make sure that the sentiment score makes sense. I do this by looking at movies with the lowest and highest sentiment scores to see what is getting these extreme sentiments. These quick checks reveal that while sentiment scores for individual variables (like plot keywords) may be very low or very high, the fac that there are 3 sources of sentiment scores results in a "tempering" of the final average sentiment score. This may be for the best but may also not be for the best. I may want to think about include the average versus not including the average. One could argue that these 3 different things are uniquely their own.
+
+Tagline -- meant to grab attention, may have more extreme dispersion
+Keywords -- may not be very reflective of what's going on in the movie at all, should consider excluding
+Overview -- probably the most reflective of what's actually happening with the movie
+
+For purposes of understanding the impact of movie sentiment on predicting whether a movie is a cult hit or not, it's the OVERVIEW that should be used rather than the tagline or keywords. The tagline is reflective of the tone of the marketing campaign associated with the original movie, but the marketing campaign shouldn't be related, so I'd expect it to not have predictive power. The plot keywords are even less relevant.
+
+So my hypotheiss is:
+
+Tagline -- no predictive power for whether a movie is cult or not
+Keywords -- no predictive power for whether a movie is cult or not
+Overview -- predictive power
+
+```{r}
+
+# focus on tagline and plot overview as sources of text analysis
+# for now, ignore plot keywords 
+
+# OVERVIEW
+
+summary(movie.sub)
+names(movie.sub)
+
+# add row id
+movie.sub <- rowid_to_column(movie.sub, "element_id")
+
+# score sentiment by each sentence in overview
+mytext <- sentiment(get_sentences(movie.sub$overview))
+names(mytext)
+
+# compute mean sentiment by each row
+mytext_summary <- group_by(mytext, element_id) %>%
+  summarise(overview_sentiment = mean(sentiment))
+
+# merge this back into the movie.sub dataset
+movie.sub <- merge(movie.sub, mytext_summary, by = "element_id")
+
+# classify sentiment as negative, neutral, or positive
+movie.sub$overview_sentiment_type <- ifelse(movie.sub$overview_sentiment<(-.05), "negative" ,
+                                            ifelse(movie.sub$overview_sentiment>=(-.05) &
+                                                     movie.sub$overview_sentiment<(.05),"neutral",
+                                                   ifelse(movie.sub$overview_sentiment>=(.05),"positive","neutral")))
+
+# TAGLINE
+
+mytagline <- sentiment(get_sentences(movie.sub$tagline))
+str(mytagline)
+
+# compute mean sentiment by each row
+mytagline_summary <- group_by(mytagline, element_id) %>%
+  summarise(tagline_sentiment = mean(sentiment))
+
+# merge this back into the movie.sub dataset
+movie.sub <- merge(movie.sub, mytagline_summary, by = "element_id")
+
+
+# PLOT KEYWORDS
+
+mykeywords <- sentiment(movie.sub$plot_keywords)
+str(mykeywords)
+
+# compute mean sentiment by each row
+mykeywords_summary <- group_by(mykeywords, element_id) %>%
+  summarise(keyword_sentiment = mean(sentiment))
+
+# merge this back into the movie.sub dataset
+movie.sub <- merge(movie.sub, mykeywords_summary, by = "element_id")
+
+# CREATE OVERALL SENTIMENT CATEGORY
+
+movie.sub[1:5, c("movie_title", "overview_sentiment", "keyword_sentiment", "tagline_sentiment")]
+
+# compute average sentiment score as an average of the 3 individual scores for tagline, keywords, and movie overview
+movie.sub$average_sentiment <- (movie.sub$overview_sentiment + movie.sub$tagline_sentiment + movie.sub$keyword_sentiment)/3
+
+# classify both sentiment scores into negative, neutral, or positive
+movie.sub$sentiment_category <- ifelse(movie.sub$average_sentiment<(-.05), "negative" ,
+                                            ifelse(movie.sub$average_sentiment>=(-.05) &
+                                                     movie.sub$average_sentiment<(.05),"neutral",
+                                                   ifelse(movie.sub$average_sentiment>=(.05),"positive","neutral")))
+
+# 7 movies where we're missing all 3 text fields
+# manually re-code their sentiment as NA
+# average sentiment should be recoded as NA if movie lacks all text information
+movie.sub$average_sentiment <- ifelse(is.na(movie.sub$overview)==TRUE & is.na(movie.sub$plot_keywords)==TRUE & is.na(movie.sub$tagline)==TRUE, NA, movie.sub$average_sentiment)
+
+sum(is.na(movie.sub$average_sentiment)==TRUE)==7 # check it worked right
+
+# lastly, examine movies with super low / super high sentiment scores
+movie.sub[,c("movie_title", "overview", "plot_keywords", "tagline", "average_sentiment", "overview_sentiment", "keyword_sentiment", "tagline_sentiment")] %>%
+  arrange((average_sentiment))
+
+
+
+```
+
+## New Feature - Content Rating
+
+I translate the below levels into number scale from NA to 8.
+
+Not Rated - NA
+Unrated - NA
+
+Approved - 1
+Passed - 1
+
+G - 2
+GP - 2
+TV-G - 2
+
+TV-PG - 3
+PG - 3
+
+PG-13 - 4
+TV-14 - 4
+
+M - 5
+
+R - 6
+
+NC-17 - 7 
+
+X - 8
+
+```{r}
+# OUTSTANDING TO DO
+
+```
+
+## Dataframes for cult and noncult
+
+```{r}
+
+
+# cult films 
+names(movie.sub.cult)
+
+cult_list_export <- (movie.sub.cult[,c(3,5,7,38:63)])
+write_csv(cult_list_export, "cult_list.csv")
+head(movie.sub.cult[,c(3,5,7,38:63)])
 
 ```
 
@@ -415,6 +680,8 @@ summary(movie.sub[,c(38:63)])
 ## EDA - Initial Look
 
 ```{r}
+
+names(movie.sub)
 
 ## FINANCIALS
 
@@ -457,12 +724,6 @@ ggplot(data = movie.sub) +
     y = 'Revenue',
     subtitle = 'Gives a sense of profitability') +
   theme_minimal()
-
-movie.sub.non <- movie.sub %>%
-  filter(cult==0)
-
-movie.sub.cult <- movie.sub %>%
-  filter(cult==1)
 
 ggplot(data = movie.sub.non) +
   aes(x = budget, y = gross) +
@@ -508,9 +769,19 @@ ggplot(data = movie.sub) +
 # GENRES
 # what are top 5 Action movies by revenue?
 
-movie.sub[,c("movie_title", "Action", "revenue", "cult")] %>%
+movie.sub[,c("movie_title", "Action", "gross", "cult")] %>%
   filter(Action==1) %>%
-  arrange(desc(revenue))
+  arrange(desc(gross))
+
+# look at total revenue associated with each genre
+# so, filter for Action and sum its revenue, and so on, and so forth
+
+genres <- c("Action", "Adventure", "Fantasy", "SciFi", "Thriller", "Romance", "Animation", "Comedy", "Family", "Musical", "Western", "Drama", "History", "Sport", "Crime", "Horror", "Mystery", "War", "Biography", "Music", "Documentary", "GameShow", "RealityTV", "News", "ShortFilm", "Noir")
+length(genres)
+
+# for each genre
+# create a vector of total genre revenue
+
 
 
 ```
@@ -531,51 +802,37 @@ ggplot(data = movie.sub) +
   theme_minimal()
 
 ggplot(data = movie.sub) +
-  aes(cult, log(revenue)) +
-  geom_boxplot(aes(fill=factor(cult))) +
-  labs(title = 'Revenue for Cults/Noncults',
-    x = '',
-    y = 'LogRevenue') +
-  theme_minimal()
-
-ggplot(data = movie.sub) +
   aes(cult, log(gross)) +
   geom_boxplot(aes(fill=factor(cult))) +
-  labs(title = 'Gross for Cults/Noncults',
+  labs(title = 'Gross Revenue for Cults/Noncults',
     x = '',
     y = 'LogGross') +
   theme_minimal()
 
+# examine correlations
+
+movie.sub.clean.fin <- movie.sub %>%
+  filter(is.na(gross)==FALSE) %>%
+  filter(is.na(budget)==FALSE)
+
+fin_corr <- cor(movie.sub.clean.fin[,c("gross", "budget")])
+
+corrplot(fin_corr, method = "circle")
+
 # profitability? 
-# revenue / budget
 # gross / budget
 # hard to compare right off the bat
 # will need to remove outliers to better see 
 
-movie.sub$roi_r <- movie.sub$revenue/movie.sub$budget
-movie.sub$roi_g <- movie.sub$gross/movie.sub$budget
+movie.sub$roi <- movie.sub$gross/movie.sub$budget
 
 ggplot(data = movie.sub) +
-  aes(cult, log(roi_r)) +
+  aes(cult, log(gross/budget)) +
   geom_boxplot(aes(fill=factor(cult))) +
-  labs(title = 'Figure 6: ROI for Non-cults vs. Cults',
+  labs(title = 'Figure 2: ROI for Cults/Noncults',
     x = '',
-    y = 'Log Revenue / Budget') +
+    y = 'Log (Gross/Budget)') +
   theme_minimal()
-
-ggplot(data = movie.sub) +
-  aes(cult, log(roi_g)) +
-  geom_boxplot(aes(fill=factor(cult))) +
-  labs(title = 'ROI for Cults/Noncults',
-    x = '',
-    y = 'Log Gross / Budget') +
-  theme_minimal()
-
-# top 5 cult movies by revenue: 
-# exorcist, planet of the apes, pulp fiction, kill bill, gremlines
-movie.sub[,c("movie_title", "revenue", "cult", "genres")] %>%
-  filter(cult==1) %>%
-  arrange(desc(revenue))
 
 # top 5 cult movies by gross: 
 # exorcist, planet of the apes, gremlines, total hairspray, pulp fiction
@@ -591,6 +848,7 @@ ggplot(data = movie.sub) +
   labs(title = 'Figure 7: Cult Status vs. Budget',
     x = 'Budget',
     y = 'Cult Status') +
+  geom_jitter() +
   theme_minimal()
 
 ggplot(data = movie.sub) +
@@ -601,20 +859,199 @@ ggplot(data = movie.sub) +
     y = 'Cult Status') +
   theme_minimal()
 
-ggplot(data = movie.sub) +
-  aes(x = popularity, y = cult) +
-  geom_point(color = '#0c4c8a') +
-  labs(title = 'Cult Status vs. Popularity',
-    x = 'Popularity',
-    y = 'Cult Status') +
-  theme_minimal()
 ```
+
+## More EDA -- Sentiment Score
+
+Based on analysis below, probably best not to include both keyword sentiment AND overview sentiment since it appears that plot keywords largely come from movie overview/description type information so there will be multicollinearity there and it could cause issues with model.
+
+Instead, plan to move forward with including just tagline sentiment and overview sentiment, in other words, 2 sentiment score predictors. Note that both seem to be sligthly negatively associated with cult movies, since cult movies have a slightly lower median sentiment score for both tagline and overview. 
+
+```{r}
+# what is the range of scores for overview?
+
+hist(movie.sub$overview_sentiment)
+hist(movie.sub$tagline_sentiment)
+hist(movie.sub$keyword_sentiment)
+
+ggplot(data = movie.sub) +
+  aes(cult, overview_sentiment) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 4: Sentiment Score for Movie Overview',
+    x = '',
+    y = 'Sentiment Score') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, tagline_sentiment) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 5: Sentiment Score for Movie Tagline',
+    x = '',
+    y = 'Sentiment Score') +
+  theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, keyword_sentiment) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 6: Sentiment Score for Movie Plot Keywords',
+    x = '',
+    y = 'Sentiment Score') + theme_minimal()
+
+ggplot(data = movie.sub) +
+  aes(cult, average_sentiment) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Avg Sentiment Score',
+    x = '',
+    y = 'Avg Sentiment Score') + theme_minimal()
+
+# examine correlations
+
+corr_tag <- cor(movie.sub[,c("tagline_sentiment", "keyword_sentiment", "overview_sentiment")])
+corrplot(corr_tag, method = "circle")
+
+
+```
+
+## More EDA - Director Effect
+
+```{r}
+## Not surprisingly...director "success" is heavily right skewed
+## Most directors generate very little revenue, a few make a lot
+
+ggplot(data = movie.sub) +
+  aes(x = director_cum_rev) +
+  geom_histogram(bins = 30, fill = '#0c4c8a') +
+  labs(title = 'Distribution of Director Gross Revenue') +
+  theme_minimal()
+
+## Comparing non cults to cults
+## We see a slightly lower director success for cults
+## But difference is not extremely stark
+
+ggplot(data = movie.sub) +
+  aes(cult, log(director_cum_rev)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Director Success for Noncults/Cults',
+    x = '',
+    y = 'Director Success') + theme_minimal()
+
+# look at cult directors -- how does their success compare? their revenue per film over time? 
+
+
+```
+
+## More EDA - Rating, Duration, Facebook Likes, Popularity, IMDB Score
+
+Rating
+Duration
+Facebook Likes
+Popularity
+IMDB Score
+
+```{r}
+
+# Vast majority of cults are rated R, PG-13, Unrated
+(table(movie.sub$cult, movie.sub$content_rating))
+
+# Duration - no apparent effect, as expected
+
+ggplot(data = movie.sub) +
+  aes(cult, duration) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Movie Duration vs. Cult Status',
+    x = '',
+    y = 'Movie Duration (minutes)') + theme_minimal()
+
+# simple plots show that you need to log transform
+hist(movie.sub$movie_facebook_likes)
+hist(movie.sub$cast_total_facebook_likes)
+hist(movie.sub$director_facebook_likes)
+
+# Facebook Likes - Movie
+# slight positive effect for cults
+ggplot(data = movie.sub) +
+  aes(cult, log(movie_facebook_likes)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 7: Movie Facebook Likes vs. Cult Status',
+    x = '',
+    y = 'Log (Movie Facebook Likes)') + theme_minimal()
+
+# what are outliers with really high facebook likes for movie in above plot?
+# just movies with super high lieks ... 
+movie.sub %>%
+  arrange(desc(movie_facebook_likes))
+
+# Facebook Likes - Cast
+# no apparent effect
+ggplot(data = movie.sub) +
+  aes(cult, log(cast_total_facebook_likes)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 9: Cast Facebook Likes vs. Cult Status',
+    x = '',
+    y = 'Log(Cast Facebook Likes)') + theme_minimal()
+
+# Facebook Likes - Director
+# no apparent effects
+ggplot(data = movie.sub) +
+  aes(cult, log(director_facebook_likes)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 8: Director Facebook Likes vs. Cult Status',
+    x = '',
+    y = 'Log(Director Facebook Likes)') + theme_minimal()
+
+# Popularity
+
+hist(movie.sub$popularity)
+
+# no apparent effects
+ggplot(data = movie.sub) +
+  aes(cult, log(popularity)) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Popularity vs. Cult Status',
+    x = '',
+    y = 'Popularity') + theme_minimal()
+
+# IMDB Score
+hist(movie.sub$imdb_score)
+
+# no apparent effects
+ggplot(data = movie.sub) +
+  aes(cult, imdb_score) +
+  geom_boxplot(aes(fill=factor(cult))) +
+  labs(title = 'Figure 10: IMDB Score vs. Cult Status',
+    x = '',
+    y = 'IMDB Score') + theme_minimal()
+
+# Is there correlation among all these popularity/"like" type things?
+# first, need to drop NA values
+
+movie.sub.clean <- movie.sub %>%
+  filter(is.na(movie_facebook_likes)==FALSE) %>%
+  filter(is.na(cast_total_facebook_likes)==FALSE) %>%
+  filter(is.na(director_facebook_likes)==FALSE) %>%
+  filter(is.na(popularity)==FALSE) %>%
+  filter(is.na(imdb_score)==FALSE) 
+  
+  
+corr_like <- cor(movie.sub.clean[,c("movie_facebook_likes", "cast_total_facebook_likes", "director_facebook_likes", "imdb_score")])
+
+corr_like
+
+corrplot(corr_like, method = "circle")
+
+# according to correlation plot, strong correlations are between IMDB Score and Movie Facebook Likes, and
+# between Popularity and Movie Facebook Likes
+
+plot(movie.sub$imdb_score, log(movie.sub$movie_facebook_likes))
+plot(movie.sub$popularity, log(movie.sub$movie_facebook_likes))
+
+```
+
 
 
 ## Time Series
 
 ```{r}
-library(ggplot2)
 
 ggplot(data = movie.sub) +
   aes(x = title_year) +
@@ -629,17 +1066,257 @@ ggplot(data = movie.sub) +
 
 ## Modeling
 
+Cult ~ Duration + Content Rating + Director Cum Revenue + Popularity + IMDB Score + Movie Facebook Likes + Director Facebook Likes + Cast Facebook Likes + Budget + Gross + Tagline Sentiment + Overview Sentiment + (1|Year) + (1|Action) + ... (1|Noir)
+
+Due to analysis of multicollinearity, I do not think it makes sense to include both Budget and Gross, since they are highly correlated. I also do not think it makes sense to include all genres, since I saw high correlations among them (specifically, I choose Family, Biography, and Thriller and leave out Animation/War/Sport/Mystery/Crime). Furthermore, I choose IMDB Score and leave out Popularity. I may additionally leave out Director Cum Revenue if it shows high multicollinearity.
+
 GLMER 
 
 ```{r}
+summary(movie.sub)
 
-summary(movie.full$title_year)
-dim(movie.sub)
+# NAs in average sentiment
+# NAs in gross and therefore in roi value
 
-# glmer(cult ~ budget + (1|genres), family = binomial(link = "logit"), data = movie.sub)
+# NAs in average sentiment because tagline, plot keywords, overview are missing
+
+movie.sub %>%
+  filter(is.na(average_sentiment)==TRUE)
+
+# prob makes more sense to just use gross as a predictor instead of ROI!
+
+# also need to save a version of dataset where i don't have these NA values
+
+# call it movie.sub.model
+
+movie.sub.model <- movie.sub %>%
+  filter(is.na(gross)==FALSE) %>%
+  filter(is.na(average_sentiment)==FALSE)
+
+str(movie.sub.model) # lost over 500 rows but now don't have NA values which is good
+summary(movie.sub.model)
+
 ```
 
+Model 1 - Multilevel Logistic Model
+
+How to handle content rating?
+Excludes Duration, Director Name, Cast Names, and ANY genres to allow for convergence
+Includes ROI and Average Sentiment instead of Overview Sentiment AND Tagline Sentiment -- seems to enable convergence
+Predicts only one movie to be a cult -- which one?
+
+```{r}
+
+# BASELINE Model 1
+
+model1 <- glmer(cult ~ average_sentiment + log(gross+1) + imdb_score + log(cast_total_facebook_likes+1) + log(director_facebook_likes+1) + log(movie_facebook_likes+1) + (1|title_year), family = binomial(link = "logit"), data = movie.sub.model)
+
+display(model1)
+summary(model1)
+
+# look at results
+
+movie.sub.model$model1 <- (fitted(model1))
+movie.sub.model$model1pred <- ifelse(fitted(model1)>0.5, 1, 0)
+plot(movie.sub.model$cult, movie.sub.model$model1pred)
+
+# model 1 thinks shawshank is a cult classic but it's not
+
+movie.sub.model[,c("movie_title", "cult", "model1pred")] %>%
+  filter(model1pred==1)
+
+# make error table
+
+model1.error <- as.data.frame(table(movie.sub.model$cult, movie.sub.model$model1pred))
+model1.error$rate <- round(model1.error$Freq/nrow(movie.sub.model), 2)
+names(model1.error) <- c("cult", "model 1 pred", "freq", "percentage")
+model1.error
+
+# results: 
+
+# 98% of time, model correctly classifies non-cult as non-cult
+# 1% of time, model incorrectly classifies cult as non-cult
+# 0% of time, model incorrectly classifies noncult as cult
+# 0% of time, model correctly classifies cult as cult
+# if you sum this, the success rate is 98% 
+
+# interesting -- so the result of the model is that it's just very conservative
+# having a hard time correctly predicting which movies ARE going to be cults 
 
 
+```
+
+Model Two
+
+```{r}
+# GENRE-FOCUSED MODEL -- start with all genres and then remove until convergence
+# then add the error stuff
+
+genres
+
+model2 <- glmer(cult ~ (1|Action) + (1|SciFi) + (1|Romance) + (1|Comedy) + (1|Family) + (1|Musical) + (1|Western) + (1|Drama) + (1|History) + (1|Sport) + (1|Horror) + (1|Documentary) + (1|Noir) + (1|title_year) + overview_sentiment, na.action = na.exclude, family = binomial(link = "logit"), data = movie.sub.model)
+
+
+
+
+```
+
+Model 3 - just horror industry - NO IMPROVEMENT ON BASELINE MODEL
+
+Converges if I exclude the 3 genres as random effects
+Error/success rate is basically the same, actually slightly worse
+
+```{r}
+
+# figure out which genres make up the biggest number of cults
+# then filter the movie.sub dataset to just those genres
+# and then build model with MAX predictors and remove predictors to get convergence
+
+movie.sub.model.cult <- movie.sub.model %>%
+  filter(cult==1)
+
+summary(movie.sub.cult)  
+
+# The following genres have highest percentages of cults:
+# Comedy, Drama, Horror
+
+# filter movie.sub.model dataset to just these genres
+
+movie.sub.model3 <- movie.sub.model %>%
+  filter(Comedy==1 | Drama==1 | Horror==1)
+
+model3 <- glmer(cult ~ average_sentiment + log(gross+1) + imdb_score + log(cast_total_facebook_likes+1) + log(director_facebook_likes+1) + log(movie_facebook_likes+1) + (1|title_year), family = binomial(link = "logit"), data = movie.sub.model3)
+
+display(model3)
+
+# look at results
+
+movie.sub.model3$model3 <- (fitted(model3))
+movie.sub.model3$model3pred <- ifelse(fitted(model3)>0.5, 1, 0)
+plot(movie.sub.model3$cult, movie.sub.model3$model3pred)
+
+# model 1 thinks shawshank is a cult classic but it's not
+
+movie.sub.model3[,c("movie_title", "cult", "model3pred")] %>%
+  filter(model3pred==1)
+
+# make error table
+
+model3.error <- as.data.frame(table(movie.sub.model3$cult, movie.sub.model3$model3pred))
+model3.error$rate <- round(model3.error$Freq/nrow(movie.sub.model3), 2)
+names(model3.error) <- c("cult", "model 3 pred", "freq", "percentage")
+model3.error
+
+```
+
+Model 4 - within top genres for Cult and R rated movies (top rating for Cult)
+Error rate is the same
+
+```{r}
+
+# majority are R rated
+table(movie.sub.cult$content_rating)
+
+# take movie.sub.model3 and make it movie.sub.model4 by filtering further to just R rating
+movie.sub.model4 <- movie.sub.model3 %>%
+  filter(content_rating=="R")
+
+# and now, run model with maximal predictors
+
+model4 <- glmer(cult ~ average_sentiment + log(gross+1) + imdb_score + log(cast_total_facebook_likes+1) + log(director_facebook_likes+1) + log(movie_facebook_likes+1) + (1|title_year), family = binomial(link = "logit"), data = movie.sub.model4)
+
+display(model4)
+
+# look at results
+
+movie.sub.model4$model4 <- (fitted(model4))
+movie.sub.model4$model4pred <- ifelse(fitted(model4)>0.5, 1, 0)
+plot(movie.sub.model4$cult, movie.sub.model4$model4pred)
+
+# model 1 thinks shawshank is a cult classic but it's not
+
+movie.sub.model4[,c("movie_title", "cult", "model4pred")] %>%
+  filter(model4pred==1)
+
+# make error table
+
+model4.error <- as.data.frame(table(movie.sub.model4$cult, movie.sub.model4$model4pred))
+model4.error$rate <- round(model4.error$Freq/nrow(movie.sub.model4), 2)
+names(model4.error) <- c("cult", "model 4 pred", "freq", "percentage")
+model4.error
+
+```
+
+Model 5 - Logistic model on horror industry and R rating
+Does not perform better than mixed effects model
+
+```{r}
+
+# one could argue that since we've honed in on one industry and content rating, there is less likely to be 
+ggplot(data = movie.sub.model4) +
+  aes(x = title_year, y = cult) +
+  geom_point(color = '#0c4c8a') +
+  geom_jitter() +
+  theme_minimal()
+
+model5 <- glm(cult ~ average_sentiment + log(gross+1) + imdb_score + log(cast_total_facebook_likes+1) + log(director_facebook_likes+1) + log(movie_facebook_likes+1), family = binomial(link = "logit"), data = movie.sub.model4)
+
+display(model5)
+
+# look at results
+
+movie.sub.model4$model <- (fitted(model5))
+movie.sub.model4$model5pred <- ifelse(fitted(model5)>0.5, 1, 0)
+plot(movie.sub.model4$cult, movie.sub.model4$model5pred)
+
+# model 1 thinks shawshank is a cult classic but it's not
+
+movie.sub.model4[,c("movie_title", "cult", "model5pred")] %>%
+  filter(model5pred==1)
+
+# make error table
+
+model5.error <- as.data.frame(table(movie.sub.model4$cult, movie.sub.model4$model5pred))
+model5.error$rate <- round(model5.error$Freq/nrow(movie.sub.model4), 2)
+names(model5.error) <- c("cult", "model 5 pred", "freq", "percentage")
+model5.error
+
+```
+
+Model 6 -  Logistic model on entire dataset
+Doesn't necessarily dramatically improve but worth discussing
+
+```{r}
+# logistic model on entire dataset, pretend there's no correlated data
+# looks pretty good, even as i include binary indicators for the genres! 
+
+model6 <- glm(cult ~ log(gross+1) + overview_sentiment + tagline_sentiment + imdb_score + log(cast_total_facebook_likes+1) + log(director_facebook_likes+1) + log(movie_facebook_likes+1) + Action + Fantasy + SciFi + Thriller + Romance + Animation + Comedy + Musical + Western + Drama + History + Sport + Horror + War + Documentary + GameShow + RealityTV + News + ShortFilm + Noir, family = binomial(link = "logit"), data = movie.sub.model)
+
+
+display(model6)
+
+# look at results
+
+length(fitted(model6))
+movie.sub.model$model6 <- (fitted(model6))
+movie.sub.model$model6pred <- ifelse(fitted(model6)>0.5, 1, 0)
+plot(movie.sub.model$cult, movie.sub.model$model6pred)
+
+# model 1 thinks shawshank is a cult classic but it's not
+
+model6results <- movie.sub.model[,c("movie_title", "cult", "model6pred")] %>%
+  filter(model6pred==1) %>%
+  arrange(desc(cult))
+
+names(model6results) <- c("Movie Title", "Actual Cult Status", "Model Predicted Cult Status")
+model6results
+
+# make error table
+
+model6.error <- as.data.frame(table(movie.sub.model$cult, movie.sub.model$model6pred))
+model6.error$rate <- round(model6.error$Freq/nrow(movie.sub.model), 2)
+names(model6.error) <- c("actual cult status", "model predicted cult status", "freq", "percentage")
+model6.error
+```
 
 
